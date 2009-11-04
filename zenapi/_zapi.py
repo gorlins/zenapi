@@ -34,6 +34,8 @@ import os
 import datetime
 import re
 import random
+import operator
+import threading
 
 class Error(Exception):
     pass
@@ -48,8 +50,8 @@ class HttpError(Error):
 
 def MakeRequest(method, params, auth=None, use_ssl=True):
     headers = {'Content-Type': 'application/json',
-               'User-Agent': 'PyZenfolio Library',
-               'X-Zenfolio-User-Agent': 'PyZenfolio Library'}
+               'User-Agent': 'Zenapi (Python) Library',
+               'X-Zenfolio-User-Agent': 'Zenapi (Python) Library'}
 
     if auth is not None:
         headers['X-Zenfolio-Token'] = auth
@@ -68,7 +70,7 @@ def MakeRequest(method, params, auth=None, use_ssl=True):
         req = urllib2.Request(url, body, headers)
         return urllib2.urlopen(urllib2.Request(url, body, headers))
     except urllib2.HTTPError, e:
-        raise HttpError(code=e.code, headers=e.headers, url=e.url, body=e.read())
+        raise HttpError(code=e.code, headers=e.headers, url=e.url,body=e.read())
 
 class RpcError(Error):
     def __init__(self, code=None, message=None):
@@ -140,7 +142,6 @@ class ResponseObject(object):
         if hasattr(self._dict, key) and self._dict[key] is None:
             return
         self._dict[key] = val
-        return obj
     
     def asdict(self):
         d = {'$type':self.__class__.__name__}
@@ -155,6 +156,7 @@ class ResponseObject(object):
     def __singulartodict(obj):
         if isinstance(obj, ResponseObject):
             return obj.asdict()
+        return obj
         
     @staticmethod
     def build(obj):
@@ -375,6 +377,44 @@ class ZenConnection(object):
         self.__username = username
         self.__password = password
 
+    class _threadcaller(threading.Thread):
+        def __init__(self, method, args, **kwargs):
+            threading.Thread.__init__(self, **kwargs)
+            if not operator.isSequenceType(args):
+                args = ((args,), {})
+            self.setargs(method, args[0], args[1])
+            
+        def setargs(self, method, methodargs, methodkwds):
+            self._response=None
+            self._method=method
+            self._methodargs = methodargs
+            self._methodkwds = methodkwds
+            
+        def run(self):
+            self._response=self._method(*self._methodargs, **self._methodkwds)
+            
+        def getResponse(self):
+            self.join()
+            return self._response
+        
+    def map(self, method, arglist):
+        """Runs a given method in parallel threads
+        method: str method name to call
+        
+        arglist: list of all args in parallell
+        ie arglist[0] = ((arg1, arg2, arg3), kwargs)
+        alternatively, if the method only requres a single argument, then
+        a plain sequence is also accepted
+        ie z.map(z.LoadPhotoSet, [p1, p2, p3...])
+        
+        returns list of all outputs
+        """
+        if isinstance(method, str):
+            method = getattr(self, method)
+        threads = [self._threadcaller(method, a) for a in arglist]
+        [t.start() for t in threads]
+        return [t.getResponse() for t in threads]
+                                      
     def save(self, filename):
         import cPickle
         tmpauth = self.auth
@@ -807,10 +847,22 @@ class ZenConnection(object):
 
 if __name__ == '__main__':
     # some simple testing
+    from time import time
     zapi = ZenConnection(username='demo')
     h = zapi.LoadGroupHierarchy()
     photosets = [p for p in h.Elements if isinstance(p, PhotoSet)]
+
+    # loads serially
+    t0 =time()
+    loadedSer = [zapi.LoadPhotoSet(p) for p in photosets]
+    print time()-t0
+    
+    # loads parallel
+    t0 = time()
+    loadedPar = zapi.map(zapi.LoadPhotoSet, photosets)
+    print time()-t0
+    
     ps = zapi.LoadPhotoSet(photosets[0])
-    p = zapi.LoadPhoto(ps.Photos[0])
+    ph = zapi.LoadPhoto(ps.Photos[0])
     pass
     
