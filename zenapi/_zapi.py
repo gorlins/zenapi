@@ -91,8 +91,7 @@ class ResponseObjectBuilder(type):
     __registered_types__={}
         
     def __new__(cls, name, bases, attrs):
-        parentfields = []#b.__fields__ for b in bases if hasattr(b, '__fields__')]
-
+        parentfields = []
         b = bases[0] #only support 1st base for now
         while b:
             if hasattr(b, '__fields__'):
@@ -106,7 +105,8 @@ class ResponseObjectBuilder(type):
         for f in myfields:
             attrs[f] = cls.getMethod(f)
             
-        new_class = super(ResponseObjectBuilder, cls).__new__(cls, name, bases, attrs)
+        new_class = super(ResponseObjectBuilder, cls).__new__(cls, name,
+                                                              bases, attrs)
         ResponseObjectBuilder.__registered_types__[name]=new_class
         return new_class
     
@@ -122,10 +122,13 @@ class ResponseObject(object):
     __fields__ = []
     __metaclass__ = ResponseObjectBuilder
     
-    def __init__(self, anydict, **kwargs):
-        kwargs.update(anydict)
+    def __init__(self, *anydicts, **kwargs):
+        for d in anydicts:
+            kwargs.update(d)
         self._dict = kwargs
-        assert kwargs['$type']==self.__class__.__name__
+        if '$type' in kwargs:
+            assert kwargs['$type'] == self.__class__.__name__
+            
         for f in self.__allfields__:
             self._dict[f] = kwargs.get(f, None)
         extra = set(kwargs.keys()) - set(self.__allfields__)
@@ -167,7 +170,8 @@ class ResponseObject(object):
             rodict[k] = ResponseObject.build(v)
             
         try:
-            return ResponseObject.__metaclass__.__registered_types__[rodict['$type']](rodict)
+            types = ResponseObject.__metaclass__.__registered_types__
+            return types[rodict['$type']](rodict)
         except KeyError:
             return rodict
     
@@ -186,7 +190,9 @@ class DateTime(ResponseObject):
     
     @staticmethod
     def str2d(s):
-        return datetime.datetime(*[int(ss) for ss in DateTime.datematch.match(s).groups()])
+        groups = DateTime.datematch.match(s).groups()
+        return datetime.datetime(*[int(ss) for ss in groups])
+    
     @staticmethod
     def d2str(d):
         return '%04i-%02i-%02i %02i:%02i:%02i'%(d.year,
@@ -258,7 +264,8 @@ def Call(method, auth=None, use_ssl=False, params=None):
         else:
             if 'code' in rpc_obj['error']:
                 raise RpcError(
-                    message=rpc_obj['error']['message'], code=rpc_obj['error']['code'])
+                    message=rpc_obj['error']['message'], 
+                    code=rpc_obj['error']['code'])
             else:
                 raise RpcError(message=rpc_obj['error']['message'])
 """
@@ -268,12 +275,15 @@ Snapshots
 class Snapshot(ResponseObject):
     __metaclass__ = ResponseObjectBuilder
 
+    __reprkeys__=['Title']
+    
     def __repr__(self):
         r = "<%s snapshot: "%self.__class__.__name__
-        r += ', '.join([f+": '%s'"%self._dict[f] for f in ['Title', 'FileName', 'Id'] if f in self._dict])
+        r += ', '.join([f+": '%s'"%self._dict.get(f,None) for f in self.__reprkeys__ ])
         return r+'>'
 
 class User(Snapshot):
+    __reprkeys__=['LoginName']
     __fields__ = ['LoginName', 'DisplayName', 'FirstName', 'LastName', 
                   'PrimaryEmail', 'BioPhoto', 'Bio', 'Views', 'GalleryCount',
                   'CollectionCount', 'PhotoCount', 'PhotoBytes', 'UserSince',
@@ -290,6 +300,7 @@ class GalleryElement(Snapshot):
 
 
 class GroupElement(GalleryElement):
+    __reprkeys__=['Title', 'Id']
     __fields__ = ['GroupIndex', 'CreatedOn', 'ModifiedOn', 'PhotoCount',
                   'ParentGroups']
     
@@ -304,10 +315,6 @@ class GroupElement(GalleryElement):
 class Group(GroupElement):
     __fields__ = ['CollectionCount', 'SubGroupCount', 'GalleryCount', 'Elements']
     
-    #def __init__(self, response):
-        #GroupElement.__init__(self, response)
-        #self._dict['Elements'] = [ResponseObject.build(r) for r in self._dict['Elements']]
-        
     def getGroup(self, title):
         return self.get(title, 'Elements', Group)
     
@@ -318,15 +325,12 @@ class PhotoSet(GroupElement):
     __fields__ = ['PhotoBytes', 'Views', 'Type', 'FeaturedIndex', 'TitlePhoto', 
                   'IsRandomTitlePhoto', 'Photos', 'Keywords', 'Categories',
                   'UploadUrl']
-    #def __init__(self, response):
-        #GroupElement.__init__(self, response)
-        #if self._dict['Photos'] is not None:
-            #self._dict['Photos'] = [ResponseObject.build(r) for r in self._dict['Photos']]
             
     def getPhoto(self, title):
         return self.get(title, 'Photos', Photo)
         
 class Photo(GalleryElement):
+    __reprkeys__=['Title', 'FileName', 'Id']
     __fields__ = ['Width', 'Height', 'Sequence', 'FileName', 'UploadedOn',
                   'TakenOn', 'Gallery', 'OriginalUrl', 'Size', 'MimeType', 
                   'PricingKey', 'UrlCore', 'Copyright', 'Rotation', 'FileHash']
