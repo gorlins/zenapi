@@ -36,6 +36,7 @@ import re
 import random
 import operator
 import threading
+#import Queue
 
 class Error(Exception):
     pass
@@ -138,6 +139,22 @@ class ResponseObject(object):
             Warning('No fields %s in class %s'%(list(extra),
                                                 self.__class__.__name__))
             
+    def update(self, dictOrRO):
+        if isinstance(dictOrRO, ResponseObject):
+            ro = dictOrRO.asdict()
+        else:
+            ro = dictOrRO
+        for k,v in ro.items():
+            if isinstance(self._dict[k], ResponseObject):
+                self._dict[k].update(v)
+            elif isinstance(v, list) or isinstance(v, tuple):
+                if self._dict[k] and isinstance(self._dict[k][0], ResponseObject):
+                    [ss.update(vv) for (ss, vv) in zip(self._dict[k], v)]
+                else:
+                    self._dict[k] = ResponseObject.build(v)
+            else:
+                self._dict[k] = v
+                
     def setIfNone(self, key, val):
         if hasattr(self._dict, key) and self._dict[key] is None:
             return
@@ -176,6 +193,7 @@ class ResponseObject(object):
             return types[rodict['$type']](rodict)
         except KeyError:
             return rodict
+        
     
 class DateTime(ResponseObject):
     __fields__ = ['Value']
@@ -297,8 +315,19 @@ class User(Snapshot):
 class GalleryElement(Snapshot):
     __fields__ = ['Title', 'Id', 'AccessDescriptor', 'Owner',
                   'Caption', 'PageUrl']
+    
     def __int__(self):
         return self.Id
+    
+    class ThreadLoader(threading.Thread):
+        def __init__(self, ge, zc, *args, **kwargs):
+            threading.Thread.__init__(self, *args, **kwargs)
+            self.ge = ge
+            self.zc = zc
+            
+        def run(self):
+            ro = getattr(self.zc, 'Load'+self.ge.__class__.__name__)(self.ge)
+            self.ge.update(ro)
 
 
 class GroupElement(GalleryElement):
@@ -411,7 +440,12 @@ class ZenConnection(object):
         """
         if isinstance(method, str):
             method = getattr(self, method)
+        #if not operator.isSequenceType(arglist[0]):
+            #arglist = [((a,), {}) for a in arglist]
         threads = [self._threadcaller(method, a) for a in arglist]
+        #threads = [threading.Thread(target=method,
+                                    #args=a[0], 
+                                    #kwargs=a[1]) for a in arglist]
         [t.start() for t in threads]
         return [t.getResponse() for t in threads]
                                       
@@ -768,9 +802,29 @@ class ZenConnection(object):
                          params=PackParams(int(photoset), updater))
 
     """
-    Extras
+    Extras not part of the api
     """
     
+    def loadFullGroupHierarchy(self):
+        """In contrast to the API, loads the hierarchy plus all photosets and
+        photos"""
+
+        threads = []
+
+        def recurse(elements):
+            for e in elements:
+                if isinstance(e, PhotoSet):
+                    t = GalleryElement.ThreadLoader(e, self)
+                    t.start()
+                    threads.append(t)
+                elif isinstance(e, Group):
+                    recurse(e.Elements)
+                    
+        h = self.LoadGroupHierarchy()
+        recurse(h.Elements)
+        [t.join() for t in threads]
+        return h
+        
     def upload(self, photoset, file_name, autoFillUpdater=True, updater=None, 
                filenameStripRoot=True):
         """Uploads a photo
@@ -850,6 +904,8 @@ if __name__ == '__main__':
     from time import time
     zapi = ZenConnection(username='demo')
     h = zapi.LoadGroupHierarchy()
+    hh = zapi.loadFullGroupHierarchy()
+    g = zapi.LoadGroup(h.Id) # should be the same as h
     photosets = [p for p in h.Elements if isinstance(p, PhotoSet)]
 
     # loads serially
@@ -864,5 +920,7 @@ if __name__ == '__main__':
     
     ps = zapi.LoadPhotoSet(photosets[0])
     ph = zapi.LoadPhoto(ps.Photos[0])
+    
+    h.update(g) # shouldn't change anything
     pass
     
