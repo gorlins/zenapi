@@ -333,7 +333,7 @@ class GalleryElement(Snapshot):
 class GroupElement(GalleryElement):
     __reprkeys__=['Title', 'Id']
     __fields__ = ['GroupIndex', 'CreatedOn', 'ModifiedOn', 'PhotoCount',
-                  'ParentGroups']
+                  'ParentGroups', 'TitlePhoto']
     
     def get(self, title, field, cls):
         objs = [o for o in self._dict[field] if isinstance(o, cls) and o.Title==title]
@@ -353,7 +353,7 @@ class Group(GroupElement):
         return self.get(title, 'Elements', PhotoSet)
     
 class PhotoSet(GroupElement):
-    __fields__ = ['PhotoBytes', 'Views', 'Type', 'FeaturedIndex', 'TitlePhoto', 
+    __fields__ = ['PhotoBytes', 'Views', 'Type', 'FeaturedIndex', #'TitlePhoto', 
                   'IsRandomTitlePhoto', 'Photos', 'Keywords', 'Categories',
                   'UploadUrl']
             
@@ -364,7 +364,8 @@ class Photo(GalleryElement):
     __reprkeys__=['Title', 'FileName', 'Id']
     __fields__ = ['Width', 'Height', 'Sequence', 'FileName', 'UploadedOn',
                   'TakenOn', 'Gallery', 'OriginalUrl', 'Size', 'MimeType', 
-                  'PricingKey', 'UrlCore', 'Copyright', 'Rotation', 'FileHash']
+                  'PricingKey', 'Views', 'UrlCore', 'Copyright', 'Rotation', 
+                  'FileHash']
     
     Original = None
     
