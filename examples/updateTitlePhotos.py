@@ -4,7 +4,7 @@ from zenapi.snapshots import Group, PhotoSet
 from zenapi.updaters import PhotoSetUpdater, GroupUpdater
 
 from time import time
-from threading import Lock, Thread
+from threading import Thread
 import Queue
 
 _q = Queue.Queue()
