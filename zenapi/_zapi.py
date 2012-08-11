@@ -987,7 +987,7 @@ class ZenConnection(object):
                 logging.info(' + %s'%photo)                
             
     def download_group(self, group, skip_existing=False, path=None, set_mtime=False,
-                       size=Photo.Original, reauth=False, auto_auth=False):
+                       size=Photo.Original, auto_auth=False):
         """Download a group and all child groups/photosets to disk
         
         params:
