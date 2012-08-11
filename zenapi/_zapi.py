@@ -22,17 +22,53 @@
 
 import hashlib
 import logging
-import simplejson
+import json
 import struct
 import urllib
 import urllib2
 import os
-import datetime
 import re
 import random
+import httplib
 import operator
-import threading
-#import Queue
+from datetime import datetime
+
+USE_TLS = True # If getting errors on https connectivity, specify as True
+
+# Need to override default openers for SSL incompatability issue
+class TLSConnection(httplib.HTTPSConnection):
+    "This class allows communication via TLS."
+
+    def connect(self):
+        "Connect to a host on a given (TLS) port."
+        import ssl, socket
+        sock = socket.create_connection((self.host, self.port),
+                                        self.timeout, self.source_address)
+        if self._tunnel_host:
+            self.sock = sock
+            self._tunnel()
+        self.sock = ssl.wrap_socket(sock, self.key_file, self.cert_file,
+                                    ssl_version=ssl.PROTOCOL_TLSv1, # Zenfolio fails on SSL
+                                    )
+
+class TLSHandler(urllib2.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(TLSConnection, req)    
+    
+def build_opener(use_tls=USE_TLS):
+    """Build the opener to handle all HTTP/HTTPS requests
+    
+    params:
+    use_tls: recent versions of the ssl protocol may cause errors when 
+    connecting to Zenfolio.  Specify use_tls=True to use an older protocol
+    when connecting via https to ensure compatibility
+    """
+    global _opener
+    if USE_TLS:
+        _opener = urllib2.build_opener(TLSHandler)
+    else:
+        _opener = urllib2.build_opener()
+build_opener()
 
 class Error(Exception):
     pass
@@ -45,29 +81,46 @@ class HttpError(Error):
         self.url = url
         self.body = body
 
-def MakeRequest(method, params, auth=None, use_ssl=True):
-    headers = {'Content-Type': 'application/json',
-               'User-Agent': 'Zenapi (Python) Library',
-               'X-Zenfolio-User-Agent': 'Zenapi (Python) Library'}
-
+class InformationLevel:
+    Level1 = 'Level1'
+    Level2 = 'Level2'
+    Full = 'Full'
+    
+def MakeHeaders(auth=None):
+    headers = {
+        'User-Agent': 'Zenapi (Python) Library',
+        'X-Zenfolio-User-Agent': 'Zenapi (Python) Library',
+    }
     if auth is not None:
         headers['X-Zenfolio-Token'] = auth
+        
+    return headers
 
+def MakeRequest(method, params, auth=None, use_ssl=True):
+    headers=MakeHeaders(auth=auth)
+    headers['Content-Type'] = 'application/json'
+    global _opener
+    ver='1.6'
+    #ver='1.2'
     if use_ssl is False and auth is None:
-        url = 'http://www.zenfolio.com/api/1.2/zfapi.asmx'
+        url = 'http://www.zenfolio.com/api/%s/zfapi.asmx'%ver
     else:
-        url = 'https://www.zenfolio.com/api/1.2/zfapi.asmx'
+        url = 'https://www.zenfolio.com/api/%s/zfapi.asmx'%ver
 
-    body = '{ "method": "%s", "params": %s' % (method, params)
-    body += ', "id": %d }' % random.randint(1, 2**16 - 1)
-
-    headers['Content-Length'] = len(body)
+    body = {
+        'method':method, 
+        'params':params,
+        'id':random.randint(1, 2**16 - 1)
+    }
+    data = json.dumps(body)
+    headers['Content-Length'] = len(data)
 
     try:
-        req = urllib2.Request(url, body, headers)
-        return urllib2.urlopen(urllib2.Request(url, body, headers))
+        req = urllib2.Request(url, data=data, headers=headers)
+        #return urllib2.urlopen(req)
+        return _opener.open(req)
     except urllib2.HTTPError, e:
-        raise HttpError(code=e.code, headers=e.headers, url=e.url,body=e.read())
+        raise HttpError(code=e.code, headers=e.headers, url=e.url, body=e.read())
 
 class RpcError(Error):
     def __init__(self, code=None, message=None):
@@ -75,13 +128,12 @@ class RpcError(Error):
         self.code = code
         self.message = message
 
-
 def PackParams(*args):
     def pullResponse(a):
         if isinstance(a, ResponseObject):
             return a.asdict()
         return a
-    return simplejson.dumps(map(pullResponse, args))
+    return map(pullResponse, args)
 
 """
 Meta framework
@@ -95,6 +147,7 @@ class ResponseObjectBuilder(type):
         while b:
             if hasattr(b, '__fields__'):
                 parentfields.extend(b.__fields__)
+                pass
             b = b.__base__
             
         myfields = list(tuple(attrs.get('__fields__', [])))# lazy copy
@@ -193,30 +246,34 @@ class ResponseObject(object):
     
 class DateTime(ResponseObject):
     __fields__ = ['Value']
-    d4='(\d{4,})'
-    d2='(\d{2,})'
-    datematch = re.compile(''.join([d4,'-',d2,'-',d2,' ',d2,':',d2,':',d2]))
+    #d4=r'(\d{4,})'
+    #d2=r'(\d{2,})'
+    FORMAT = '%Y-%m-%d %H:%M:%S'
+    #datematch = re.compile(''.join([d4,'-',d2,'-',d2,' ',d2,':',d2,':',d2]))
     
     def __init__(self, *args, **kwargs):
         ResponseObject.__init__(self, *args, **kwargs)
-        self.Value = DateTime.str2d(self.Value)
+        if not isinstance(self.Value, datetime):
+            self.Value = DateTime.str2d(self.Value)
         
     def asdict(self):
-        return {'$type':'DateTime', 'Value':DateTime.d2str(self.Value)}
+        return {'$type':'DateTime', 'Value':self.Value.strftime(self.FORMAT)}#DateTime.d2str(self.Value)}
     
-    @staticmethod
-    def str2d(s):
-        groups = DateTime.datematch.match(s).groups()
-        return datetime.datetime(*[int(ss) for ss in groups])
+    @classmethod
+    def str2d(cls, s):
+        #groups = DateTime.datematch.match(s).groups()
+        #return datetime.datetime(*[int(ss) for ss in groups])
+        return datetime.strptime(s, cls.FORMAT)
     
-    @staticmethod
-    def d2str(d):
-        return '%04i-%02i-%02i %02i:%02i:%02i'%(d.year,
-                                                d.month,
-                                                d.day,
-                                                d.hour,
-                                                d.minute, 
-                                                d.second)
+    @classmethod
+    def d2str(cls, d):
+        #return '%04i-%02i-%02i %02i:%02i:%02i'%(d.year,
+                                                #d.month,
+                                                #d.day,
+                                                #d.hour,
+                                                #d.minute, 
+                                                #d.second)
+        return d.strftime(cls.FORMAT)
                                         
     
 """
@@ -263,7 +320,7 @@ class PhotoUpdater(CommonUpdater):
 
 def Call(method, auth=None, use_ssl=False, params=None):
     if params is None:
-        params = '[]'
+        params = []
 
     try:
         resp = MakeRequest(method, params, auth, use_ssl)
@@ -271,19 +328,19 @@ def Call(method, auth=None, use_ssl=False, params=None):
         logging.warning('ZenFolio API Call for %s failed with params: %s\n'
                         'response code %d with body:\n %s', method, params,
                         e.code, e.body)
-        raise Error
+        raise e
+    
+    response = resp.read()
+    rpc_obj = json.loads(response)
+    if rpc_obj['error'] is None:
+        return rpc_obj['result']
     else:
-        response = resp.read()
-        rpc_obj = simplejson.loads(response)
-        if rpc_obj['error'] is None:
-            return rpc_obj['result']
+        if 'code' in rpc_obj['error']:
+            raise RpcError(
+                message=rpc_obj['error']['message'], 
+                code=rpc_obj['error']['code'])
         else:
-            if 'code' in rpc_obj['error']:
-                raise RpcError(
-                    message=rpc_obj['error']['message'], 
-                    code=rpc_obj['error']['code'])
-            else:
-                raise RpcError(message=rpc_obj['error']['message'])
+            raise RpcError(message=rpc_obj['error']['message'])
 """
 Snapshots
 """
@@ -293,43 +350,34 @@ class Snapshot(ResponseObject):
 
     __reprkeys__=['Title']
     
-    def __repr__(self):
-        r = "<%s snapshot: "%self.__class__.__name__
-        r += ', '.join([f+": '%s'"%self._dict.get(f,None) for f in self.__reprkeys__ ])
-        return r+'>'
-
-class User(Snapshot):
-    __reprkeys__=['LoginName']
-    __fields__ = ['LoginName', 'DisplayName', 'FirstName', 'LastName', 
-                  'PrimaryEmail', 'BioPhoto', 'Bio', 'Views', 'GalleryCount',
-                  'CollectionCount', 'PhotoCount', 'PhotoBytes', 'UserSince',
-                  'LastUpdated', 'PublicAddress', 'PersonalAddress',
-                  'RecentPhotoSets', 'FeaturedPhotoSets', 'RootGroup',
-                  'ReferralCode', 'ExpiresOn', 'Balance', 'DomainName',
-                  'StorageQuota', 'PhotoBytesQuota']
-
-class GalleryElement(Snapshot):
-    __fields__ = ['Title', 'Id', 'AccessDescriptor', 'Owner',
-                  'Caption', 'PageUrl']
-    
     def __int__(self):
-        return self.Id
+        return int(self.Id)
     
-    class ThreadLoader(threading.Thread):
-        def __init__(self, ge, zc, *args, **kwargs):
-            threading.Thread.__init__(self, *args, **kwargs)
-            self.ge = ge
-            self.zc = zc
-            
-        def run(self):
-            ro = getattr(self.zc, 'Load'+self.ge.__class__.__name__)(self.ge)
-            self.ge.update(ro)
+    def __repr__(self):
+        rep=', '.join([f+": '%s'"%self._dict.get(f,None) for f in self.__reprkeys__ ])
+        r = "<%s snapshot: %s>"%(self.__class__.__name__, rep)
+        return r
+
+#class User(Snapshot):
+    #__reprkeys__=['LoginName']
+    #__fields__ = ['LoginName', 'DisplayName', 'FirstName', 'LastName', 
+                  #'PrimaryEmail', 'BioPhoto', 'Bio', 'Views', 'GalleryCount',
+                  #'CollectionCount', 'PhotoCount', 'PhotoBytes', 'UserSince',
+                  #'LastUpdated', 'PublicAddress', 'PersonalAddress',
+                  #'RecentPhotoSets', 'FeaturedPhotoSets', 'RootGroup',
+                  #'ReferralCode', 'ExpiresOn', 'Balance', 'DomainName',
+                  #'StorageQuota', 'PhotoBytesQuota']
 
 
-class GroupElement(GalleryElement):
+class GroupElement(Snapshot):
     __reprkeys__=['Title', 'Id']
-    __fields__ = ['GroupIndex', 'CreatedOn', 'ModifiedOn', 'PhotoCount',
-                  'ParentGroups', 'TitlePhoto']
+    __fields__ = [
+        'Id',
+        'GroupIndex',
+        'Title',
+        'AccessDescriptor',
+        'Owner',
+    ]
     
     def get(self, title, field, cls):
         objs = [o for o in self._dict[field] if isinstance(o, cls) and o.Title==title]
@@ -340,7 +388,37 @@ class GroupElement(GalleryElement):
         return objs[0]
     
 class Group(GroupElement):
-    __fields__ = ['CollectionCount', 'SubGroupCount', 'GalleryCount', 'Elements']
+    __fields__ = [
+        #
+        # Level 1 fields
+        #
+        'CreatedOn',
+        'ModifiedOn',
+        'PageUrl',               # new in version 1.1
+        'TitlePhoto',            # new in version 1.2
+        'MailboxId',             # new in version 1.3
+        'ImmediateChildrenCount',   # new in version 1.4
+        'TextCn',                   # new in version 1.4
+    
+        #
+        # Level 2 fields
+        #
+        'Caption',
+    
+        #
+        # Full level fields
+        #
+        'CollectionCount',
+        'SubGroupCount',
+        'GalleryCount',
+        'PhotoCount',
+        'ParentGroups',
+    
+        #
+        # Other fields
+        #
+        'Elements',
+    ]
     
     def getGroup(self, title):
         return self.get(title, 'Elements', Group)
@@ -349,19 +427,88 @@ class Group(GroupElement):
         return self.get(title, 'Elements', PhotoSet)
     
 class PhotoSet(GroupElement):
-    __fields__ = ['PhotoBytes', 'Views', 'Type', 'FeaturedIndex', #'TitlePhoto', 
-                  'IsRandomTitlePhoto', 'Photos', 'Keywords', 'Categories',
-                  'UploadUrl']
+    __fields__ = [
+        #
+        # Level 1 fields
+        #
+        'CreatedOn',
+        'ModifiedOn',
+        'Type',
+        'FeaturedIndex',
+        'TitlePhoto',
+        'PhotoCount',
+        'Views',
+        'UploadUrl',
+        'PageUrl',                  # new in version 1.1
+        'MailboxId',                # new in version 1.3
+        'TextCn',                   # new in version 1.4
+        'VideoUploadUrl',           # new in version 1.5
+        
+        #
+        # Level 2 fields
+        #
+        'Caption',
+        'Keywords',
+        'Categories',
+        'IsRandomTitlePhoto',
+        
+        #
+        # Full level fields
+        #
+        'ParentGroups',
+        'PhotoBytes',
+        
+        #
+        # Other fields
+        #
+        'Photos',
+    ]
             
     def getPhoto(self, title):
         return self.get(title, 'Photos', Photo)
         
-class Photo(GalleryElement):
+class Photo(Snapshot):
     __reprkeys__=['Title', 'FileName', 'Id']
-    __fields__ = ['Width', 'Height', 'Sequence', 'FileName', 'UploadedOn',
-                  'TakenOn', 'Gallery', 'OriginalUrl', 'Size', 'MimeType', 
-                  'PricingKey', 'Views', 'UrlCore', 'Copyright', 'Rotation', 
-                  'FileHash']
+    __fields__ = [
+        #
+        # Level 1 fields
+        #
+        'Id',
+        'Width',
+        'Height',
+        'Sequence',
+        'AccessDescriptor',
+        'Owner',
+        'Title',
+        'MimeType',
+        'Views',
+        'Size',
+        'Gallery',
+        'OriginalUrl',
+        'UrlCore',
+        'UrlHost',             # new in version 1.4
+        'UrlToken',            # new in version 1.4
+        'PageUrl',              # new in version 1.1
+        'MailboxId',           # new in version 1.3
+        'TextCn',                 # new in version 1.4
+        'Flags',           # new in version 1.4
+        'IsVideo',               # new in version 1.6
+        'Duration',               # new in version 1.6
+    
+        #
+        # Level 2 fields
+        #
+        'Caption',
+        'FileName',
+        'UploadedOn',
+        'TakenOn',
+        'Keywords',
+        'Categories',
+        'Copyright',
+        'Rotation',
+        'ExifTags',         # new in version 1.4
+        'ShortExif',            # new in version 1.4        
+    ]
     
     Original = None
     
@@ -385,9 +532,53 @@ class Photo(GalleryElement):
         if size is None:
             return self.OriginalUrl
         
-        return "www.zenfolio.com%s-%s.jpg"%(self.UrlCore, size)
+        return 'http://{p.UrlHost}/{p.UrlCore}-{Size}.jpg?sn={p.Sequence}&tk={p.UrlToken}'.format(p=self, Size=size)
     
+    def download(self, fn=None, path=None, size=Original, auth=None, skip_existing=False, set_mtime=False):
+        """Downloads the photo to disk
+        params:
+        fn: filename to save.  If None, uses self.Title
+        path: parent directory.  If None, uses current director
+        skip_existing: if True, doesn't overwrite local photos
+        auth: authentication token if photo is not public.  
+        Using ZenConnection.download(...) is highly recommended if this is the 
+        case.
+        set_mtime: if True, sets the modification timestamp on the file
+        as that of the upload time (helps with future syncing).  Must have loaded
+        Level2 for this to work
+        
+        returns: True if downloaded, else False
+        """
+        if fn is None:
+            fn = self.Title
+        if path is None:
+            path=os.curdir
+        
+        fp = os.path.join(path, fn)
+        base = os.path.dirname(fp)
+        
+        if not os.path.isdir(base):
+            os.makedirs(base)
+            
+        if os.path.isfile(fp):
+            if skip_existing:
+                return False
+            else:
+                os.remove(fp)
 
+        data = urllib2.urlopen(
+            urllib2.Request(
+                self.getUrl(size=size), headers=MakeHeaders(auth=auth))).read() 
+        
+        with open(fp, 'wb') as f:
+            f.write(data)
+            
+        if set_mtime:
+            from time import mktime
+            ts = mktime(self.UploadedOn.Value.timetuple())
+            os.utime(fp, (ts, ts))
+            
+        return True
 
 """
 Formal API
@@ -402,49 +593,6 @@ class ZenConnection(object):
             password = z.__password
         self.__username = username
         self.__password = password
-
-    class _threadcaller(threading.Thread):
-        def __init__(self, method, args, **kwargs):
-            threading.Thread.__init__(self, **kwargs)
-            if not operator.isSequenceType(args):
-                args = ((args,), {})
-            self.setargs(method, args[0], args[1])
-            
-        def setargs(self, method, methodargs, methodkwds):
-            self._response=None
-            self._method=method
-            self._methodargs = methodargs
-            self._methodkwds = methodkwds
-            
-        def run(self):
-            self._response=self._method(*self._methodargs, **self._methodkwds)
-            
-        def getResponse(self):
-            self.join()
-            return self._response
-        
-    def map(self, method, arglist):
-        """Runs a given method in parallel threads
-        method: str method name to call
-        
-        arglist: list of all args in parallell
-        ie arglist[0] = ((arg1, arg2, arg3), kwargs)
-        alternatively, if the method only requres a single argument, then
-        a plain sequence is also accepted
-        ie z.map(z.LoadPhotoSet, [p1, p2, p3...])
-        
-        returns list of all outputs
-        """
-        if isinstance(method, str):
-            method = getattr(self, method)
-        #if not operator.isSequenceType(arglist[0]):
-            #arglist = [((a,), {}) for a in arglist]
-        threads = [self._threadcaller(method, a) for a in arglist]
-        #threads = [threading.Thread(target=method,
-                                    #args=a[0], 
-                                    #kwargs=a[1]) for a in arglist]
-        [t.start() for t in threads]
-        return [t.getResponse() for t in threads]
                                       
     def save(self, filename):
         import cPickle
@@ -481,8 +629,8 @@ class ZenConnection(object):
         
     def Authenticate(self):
         auth_challenge = self.GetChallenge()
-        salt = ''.join([chr(x) for x in auth_challenge['PasswordSalt']])
-        challenge = ''.join([chr(x) for x in auth_challenge['Challenge']])
+        salt = ''.join(map(chr, auth_challenge['PasswordSalt']))
+        challenge = ''.join(map(chr, auth_challenge['Challenge']))
 
         combo = salt + self.__password.encode('utf-8')
         h2 = hashlib.sha256(combo)
@@ -562,10 +710,13 @@ class ZenConnection(object):
     def GetCategories(self):
         return self.call('GetCategories', use_ssl=False)#orig no auth?
 
+    def GetDownloadOriginalKey(self, photos, password):
+        ids = map(int, photos)
+        return self.call('GetDownloadOriginalKey', params=PackParams(ids, password))
+    
     def GetPopularPhotos(self, offset=0, limit=0):
         return self.call('GetPopularPhotos',
                          params=PackParams(offset, limit))
-
 
     def GetPopularSets(self, photoset_type=None, offset=0, limit=15):
         if photoset_type not in ('Gallery', 'Collection'):
@@ -593,9 +744,9 @@ class ZenConnection(object):
                          params=PackParams(keyring, realmId, password))
 
 
-    def LoadGroup(self, group):
+    def LoadGroup(self, group, level=InformationLevel.Level1, includeChildren=False):
         return self.call('LoadGroup',
-                         params=PackParams(int(group)))
+                         params=PackParams(int(group), level, includeChildren))
 
 
     def LoadGroupHierarchy(self):
@@ -603,14 +754,14 @@ class ZenConnection(object):
                          params=PackParams(self.__username))
 
 
-    def LoadPhoto(self, photo):
+    def LoadPhoto(self, photo, level=InformationLevel.Level1):
         return self.call('LoadPhoto',
-                         params=PackParams(int(photo)))
+                         params=PackParams(int(photo), level))
 
 
-    def LoadPhotoSet(self, photoset):
+    def LoadPhotoSet(self, photoset, level=InformationLevel.Level1, includePhotos=False):
         return self.call('LoadPhotoSet',
-                         params=PackParams(int(photoset)))
+                         params=PackParams(int(photoset), level, includePhotos))
 
 
     def LoadPrivateProfile(self):
@@ -801,27 +952,75 @@ class ZenConnection(object):
     """
     Extras not part of the api
     """
-    
-    def loadFullGroupHierarchy(self):
-        """In contrast to the API, loads the hierarchy plus all photosets and
-        photos"""
-
-        threads = []
-
-        def recurse(elements):
-            for e in elements:
-                if isinstance(e, PhotoSet):
-                    t = GalleryElement.ThreadLoader(e, self)
-                    t.start()
-                    threads.append(t)
-                elif isinstance(e, Group):
-                    recurse(e.Elements)
-                    
-        h = self.LoadGroupHierarchy()
-        recurse(h.Elements)
-        [t.join() for t in threads]
-        return h
         
+    def download(self, photo, fn=None, path=None, skip_existing=False, set_mtime=False, size=Photo.Original):
+        """Downloads a photo using current authentication
+        returns True if photo downloaded, False if skipped
+        """
+        return photo.download(fn=fn, path=path, auth=self.auth, skip_existing=skip_existing, set_mtime=set_mtime, size=size)
+        
+    def download_photoset(self, photoset, skip_existing=False, path=None, set_mtime=False, size=Photo.Original, auto_auth=False):
+        """Download a PhotoSet to local disk
+        
+        params:
+        photoset: a PhotoSet snapshot
+        skip_existing: passed to download (doesn't overwrite existing photos on disk)
+        path: parent folder in which to place PhotoSet (creates folder PhotoSet.Title underneath)
+        auto_auth: if True, (re) authenticates before downloading to ensure access
+        size: photo size to download
+        """
+        
+        if auto_auth:
+            self.Authenticate()
+        logging.info('Downloading %s...'%photoset)
+        if not photoset.Photos:
+            photoset = self.LoadPhotoSet(photoset, level=InformationLevel.Level2,
+                                         includePhotos=True)
+        if path is None:
+            path = os.curdir
+        
+        fp = os.path.join(path, photoset.Title)
+        if not os.path.isdir(fp):
+            os.makedirs(fp)
+        for photo in photoset.Photos:
+            if self.download(photo, path=fp, size=size, set_mtime=set_mtime, skip_existing=skip_existing):
+                logging.info(' + %s'%photo)                
+            
+    def download_group(self, group, skip_existing=False, path=None, set_mtime=False,
+                       size=Photo.Original, reauth=False, auto_auth=False):
+        """Download a group and all child groups/photosets to disk
+        
+        params:
+        group: Group snapshot or id
+        path: parent directory in which to place group 
+        (creates folder group.Title underneath).
+        """
+        if (not isinstance(group, Group)) or (not group.Elements):
+            group = self.LoadGroup(group, level=InformationLevel.Level2, includeChildren=True)
+        
+        if path is None:
+            path=os.curdir
+            
+        mypath = os.path.join(path, group.Title)
+        
+        for element in group.Elements:
+            if isinstance(element, PhotoSet):
+                # Put photoset in this directory if title matches
+                if element.Title == group.Title:
+                    p = path # One level up
+                else:
+                    p = mypath
+                self.download_photoset(
+                    element, set_mtime=set_mtime,
+                    skip_existing=skip_existing,
+                    path=p, auto_auth=auto_auth, size=size)
+            elif isinstance(element, Group):
+                self.download_group(element, set_mtime=set_mtime,
+                                    skip_existing=skip_existing, auto_auth=auto_auth,
+                                    path=mypath, size=size)
+            else:
+                raise TypeError('Unknown element type %s'%element.__class__.__name__)
+            
     def upload(self, photoset, file_name, autoFillUpdater=True, updater=None, 
                filenameStripRoot=True):
         """Uploads a photo
@@ -877,7 +1076,7 @@ class ZenConnection(object):
         opener = urllib2.build_opener(urllib2.HTTPHandler(debuglevel=0))
         
         try:
-            result = simplejson.loads(opener.open(req).read())
+            result = json.loads(opener.open(req).read())
             #result = self.LoadPhoto(Photo({'Id':result}))
             if updater is None:
                 updater = PhotoUpdater()
@@ -887,7 +1086,7 @@ class ZenConnection(object):
                 updater.setIfNone('FileName', zfilename)
             result = self.UpdatePhoto(Photo({'Id':result}), updater)
             #LOG.debug ("RESPONSE: --\n%s\n--\n" % data)
-            #result = simplejson.loads(data)
+            #result = json.loads(data)
             # TBD : check for erorr by checking the status of the HTTP message
         except Exception, e:
             print e
@@ -901,23 +1100,7 @@ if __name__ == '__main__':
     from time import time
     zapi = ZenConnection(username='demo')
     h = zapi.LoadGroupHierarchy()
-    hh = zapi.loadFullGroupHierarchy()
-    g = zapi.LoadGroup(h.Id) # should be the same as h
-    photosets = [p for p in h.Elements if isinstance(p, PhotoSet)]
-
-    # loads serially
-    t0 =time()
-    loadedSer = [zapi.LoadPhotoSet(p) for p in photosets]
-    print time()-t0
+    g = zapi.LoadGroup(h)
     
-    # loads parallel
-    t0 = time()
-    loadedPar = zapi.map(zapi.LoadPhotoSet, photosets)
-    print time()-t0
-    
-    ps = zapi.LoadPhotoSet(photosets[0])
-    ph = zapi.LoadPhoto(ps.Photos[0])
-    
-    h.update(g) # shouldn't change anything
     pass
     

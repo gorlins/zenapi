@@ -17,4 +17,4 @@
     You should have received a copy of the GNU General Public License
     along with Zenapi.  If not, see <http://www.gnu.org/licenses/>.
 """
-from _zapi import User, Group, PhotoSet, Photo
+from _zapi import Group, PhotoSet, Photo

@@ -1,4 +1,4 @@
-
+raise NotImplementedError("Haven't updated for api v1.6, this example is untested.  Use at own risk")
 from zenapi import ZenConnection
 from zenapi.snapshots import Group, PhotoSet
 from zenapi.updaters import PhotoSetUpdater, GroupUpdater
