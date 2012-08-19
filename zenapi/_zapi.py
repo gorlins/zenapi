@@ -599,7 +599,7 @@ class ZenConnection(object):
         tmpauth = self.auth
         self.auth = None
         f = file(filename, mode='w')
-        cPickle.dump(self, f)
+        cPickle.dump(self, f, cPickle.HIGHEST_PROTOCOL)
         f.close()
         self.auth = tmpauth
         
